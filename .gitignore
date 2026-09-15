@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+# Rendered output from running the example or the preview script
+*.icon/
+*.png
