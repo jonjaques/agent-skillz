@@ -12,15 +12,16 @@
 //   node iconkit.mjs ictool                     # print the resolved ictool path
 //
 // Every constraint encoded here was established by probing ictool (Icon
-// Composer 27.0, Xcode 27), not from documentation. See
+// Composer 27.0 and 27.1, Xcode 27), not from documentation. See
 // ../references/file-format.md for the reasoning behind each one.
 //
 // No dependencies. Node 18+.
 
-import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export const CANVAS = { ios: 1024, macos: 1024, watchos: 1088 };
@@ -165,12 +166,21 @@ export const layer = ({ name, image, fill, specializations, glass = true, hidden
  *                 (the UI's "Natural") or "layer-color" (the UI's "Chromatic").
  *   translucency  0..1, or null to disable. Thin shapes lose their colour above
  *                 ~0.3; solid volumes can take 0.5+.
- *   specular      edge highlight. Off for full-bleed layers.
- *   lighting      "individual" | "combined": whether the glass lighting is
- *                 computed per layer or across the group. Only observable
- *                 with 2+ layers in the group.
- *   refractivity  { strength, depth } (0..1 each). Icon Composer 2 / 27.
- *   blurMaterial  0..1 material thickness. The older `blur` key is inert.
+ *   specular      edge highlight. Off for full-bleed layers. `true` renders
+ *                 identically to "automatic" in 27.1, which resolved to
+ *                 "inside" in Default and "outside" in Dark in every probe.
+ *   lighting      "individual" (the default) | "combined": whether the glass
+ *                 lighting is computed per layer or across the group. Only
+ *                 observable with 2+ layers. "combined" lights the group as ONE
+ *                 glass body: abutting layers lose the rims at their seams,
+ *                 which is how a multi-stop gradient is built (design.md).
+ *   refractivity  { strength, depth }. strength -1..1, clamped (-1.5 renders
+ *                 as -1); negative is Apple's "inverse refraction", bending the
+ *                 backdrop toward the rim like a sphere. 0, or enabled:false, is
+ *                 a no-op. depth 0..1 scales it. It only bends what is BEHIND
+ *                 the group, so it needs structure back there to show.
+ *   blurMaterial  0..1 material thickness; 0 and null are no-ops, strings are
+ *                 rejected. The older `blur` key is inert.
  *   specularPlacement  "inside" | "outside" | "automatic". Accepted by ictool
  *                 27.0 but produced no pixel change in any probe; kept so a
  *                 document round-trips through the app unchanged.
@@ -268,11 +278,25 @@ export const buildIcon = (dir, { assets, document }) => {
  * Wrap paths in a full-canvas SVG. Colour is irrelevant when the layer sets a
  * `fill` (the layer fill overrides the artwork entirely), so a placeholder ink
  * just keeps the raw file viewable on its own.
+ *
+ * Unless `anchor: false`, it also gets two transparent 1-pt rects in opposite
+ * canvas corners. They are load-bearing: a layer gradient's `orientation` is
+ * normalized to the artwork's BOUNDING BOX, not the canvas (pixel-verified,
+ * ictool 27.1), so the same start/stop lands somewhere different on a small
+ * shape than on a full-bleed one. Pinning every layer's bounds to the canvas
+ * makes orientation the canvas fraction everything here computes it as.
+ * Opacity 0 still counts toward the bounds (`fill="none"` does not), the
+ * squircle mask removes those corners, and the render differs from an
+ * unanchored one only in rim antialiasing, by under 3% per pixel.
  */
-export const svg = (body, size = 1024) =>
+const ANCHORS = (size) =>
+  `\n  <rect x="0" y="0" width="1" height="1" fill="#FFFFFF" fill-opacity="0"/>` +
+  `\n  <rect x="${size - 1}" y="${size - 1}" width="1" height="1" fill="#FFFFFF" fill-opacity="0"/>`;
+export const svg = (body, size = 1024, { anchor = true } = {}) =>
   `<?xml version="1.0" encoding="UTF-8"?>\n` +
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">\n` +
   body +
+  (anchor ? ANCHORS(size) : "") +
   `\n</svg>\n`;
 
 export const f = (n) => Number(n.toFixed(2));
@@ -566,7 +590,18 @@ const validate = (bundle) => {
   process.exit(failed || problems.length ? 1 : 0);
 };
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+// Compare REAL paths. Skills are commonly installed as a symlink (Claude Code
+// reads ~/.claude/skills, which points into ~/.agents/skills), and
+// import.meta.url is always the resolved path, so a plain string compare made
+// every CLI call through the symlink exit 0 having printed nothing — and
+// preview.sh, which shells out here for the ictool path, then failed.
+const isMain = (() => {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
 if (isMain) {
   const [cmd, arg] = process.argv.slice(2);
   try {

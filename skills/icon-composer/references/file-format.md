@@ -14,14 +14,21 @@ Everything below was established by probing `ictool` against real bundles.
 Apple documents the app, not the file, so treat this as the reference and
 re-probe if a new Xcode changes something.
 
-**Verified against Icon Composer 27.0 (bundle 129), the build inside Xcode 27.**
-`ictool --version` prints it. The Xcode 26 build reports `1.x`, the Xcode 27
-betas reported `2.0`; the app now shares Xcode's version number. Where a 1.x
-build behaves differently it is noted.
+**Verified against Icon Composer 27.0 (bundle 129), the build inside Xcode 27,
+and re-verified against 27.1 (still bundle 129, Xcode 27.1).** `ictool
+--version` prints it. The Xcode 26 build reports `1.x`, the Xcode 27 betas
+reported `2.0` (which is why WWDC26 coverage says "Icon Composer 2"); the app
+now shares Xcode's version number. Where a 1.x build behaves differently it is
+noted.
+
+The 27.1 pass corrected three things the 27.0 notes had wrong, all folded in
+below: gradient `orientation` is relative to the artwork's bounding box (gotcha
+8), `specular: true` means `"automatic"` rather than `"outside"`, and `idiom`
+specializations are honored.
 
 ---
 
-## The seven things that will cost you an hour
+## The eight things that will cost you an hour
 
 **1. Group index 0 is the FRONT, and so is layer index 0 inside a group.**
 `groups[0]` renders on top; the last entry is furthest back. This is the
@@ -73,6 +80,18 @@ key to get sRGB, which is what plain hex in an SVG means anyway.
 
 **7. A dangling `image-name` is not an error.** It renders as an empty layer,
 exit 0. `iconkit.mjs validate` cross-checks every reference against `Assets/`.
+
+**8. A layer gradient's `orientation` is a fraction of the artwork's bounding
+box, not of the canvas.** Proven with a bar spanning the left half of the
+canvas and `start x 0.25 → stop x 0.75`: the ramp ran from 25% to 75% *of the
+bar*. A full-bleed shape hides this, because there the two boxes coincide. So
+the same orientation on a small shape and a large one lands in different
+places, and any axis computed from canvas geometry is wrong unless the art is
+full-bleed. Fix: pin every layer's bounds to the canvas with two transparent
+1-pt rects in opposite corners. `fill-opacity="0"` still counts toward the box
+(`fill="none"` does not); the squircle mask removes those corners; the render
+otherwise differs only in rim antialiasing, under 3% per pixel. `iconkit.mjs`
+`svg()` adds them by default (`{ anchor: false }` to opt out).
 
 ---
 
@@ -145,13 +164,14 @@ Observed in `ictool` 27.0, by pixel-diffing renders with and without the key:
 
 | Key | Effect |
 |---|---|
-| `lighting` | Changes the render only when the group has 2+ layers. `"individual"` lights each layer on its own; `"combined"` lights the group as one body. Any other string is rejected with a clear message. |
-| `refractivity` | Changes the render, with or without `features`. Icon Composer writes the `features` entry; `iconkit.mjs` does too. Missing `strength` or `depth` fails with "is missing". |
-| `blur-material` | Changes the render. Numeric only. |
+| `lighting` | Changes the render only when the group has 2+ layers. `"individual"` (the default: omitting the key renders identically) lights each layer on its own, so every edge, including a seam between two abutting layers, gets its own specular rim. `"combined"` lights the group as one body: abutting layers fuse and the seams disappear, which is how to build a gradient with more than two stops (`design.md`). Any other string is rejected with a clear message. |
+| `refractivity` | Changes the render, with or without `features`. `strength` runs −1…1 and is clamped (−1.5 renders exactly as −1). **Negative is Apple's "inverse refraction"**: the backdrop is drawn toward the rim and wraps around it like a sphere, where positive swirls it like a lens. `strength: 0` and `enabled: false` are both exact no-ops. `depth` (0…1) scales the effect. It bends only what lies *behind* the group, so an opaque mark over a smooth ground barely changes: under 0.1% RMSE in one probe. Icon Composer writes the `features` entry; `iconkit.mjs` does too. Missing `strength` or `depth` fails with "is missing". |
+| `blur-material` | Changes the render at 0.5 and 1. `0` and `null` are no-ops. Numeric only: a string such as `"regular"` fails with "isn't in the correct format". |
 | `blur` | The 1.x key. Accepted and **inert** in 27.0: no pixel changed at any value. Use `blur-material`. |
-| `specular-highlight-placement` | Accepted, **no pixel change** in any probe (single and multi-layer, with a backdrop group, 64 to 256 px). Possibly a GUI-only or future control; write it if the app wrote it, do not rely on it. |
+| `specular-highlight-placement` | Accepted, **no pixel change** in any probe on 27.0 or 27.1 (single and multi-layer, with a backdrop group, 64 to 256 px, with and without `features: ["specular-location"]`). The inside/outside choice Apple demonstrated at WWDC26 is what `specular` itself does (next row). Write this key if the app wrote it; do not rely on it. |
 | `shadow.kind` | `"neutral"` (the UI's *Natural*), `"layer-color"` (the UI's *Chromatic*), `"none"`. `"chromatic"` and other UI spellings are rejected. |
-| `specular` | Also accepts `"inside"` / `"outside"` strings; `true` behaves like `"outside"`. |
+| *all of the above* | **No-ops when no layer in the group has `glass: true`.** `specular: true`, `translucency 0.6`, `shadow` neutral at 1, `blur-material: 1` and `lighting: "combined"` each rendered pixel-identically (RMSE 0, Default and Dark) on a group of `glass: false` layers. |
+| `specular` | `true`, `"automatic"`, `"inside"`, `"outside"`, `false`. In 27.1 `true` renders byte-identically to `"automatic"`, and automatic resolved to `"inside"` in Default (over light and dark grounds alike) and to `"outside"` in Dark. (The 27.0 notes said `true` behaves like `"outside"`; that holds only in Dark.) Inside draws the highlight just within the edge; outside draws a halo just beyond it. |
 
 `shadow`, `translucency` and `refractivity` are specialized **as whole
 objects** (`shadow-specializations`, with the plain `shadow` dropped). There is
@@ -181,10 +201,40 @@ no nested `shadow.kind-specializations`.
 }
 ```
 
-A layer `fill` **overrides the SVG's own colours entirely**, through the
-artwork's alpha. That is a feature: author artwork as flat single-colour
-shapes and drive all colour from `icon.json`, where appearance variants live.
-`"fill": "none"` or `"automatic"` leaves the artwork's own colours in place.
+A layer `fill` **overrides the SVG's own colors entirely**. That is a
+feature: author artwork as flat single-color shapes and drive all color from
+`icon.json`, where appearance variants live. `"fill": "none"` or `"automatic"`
+leaves the artwork's own colors in place, and `"automatic"` works as the base
+entry of a `fill-specializations` array too (verified byte-identical in
+Default), so one appearance can be recolored while the others keep the art.
+
+**A fill paints the artwork's geometry, not its alpha.** Verified on 27.1: a
+spark drawn as a radial gradient fading to `stop-opacity="0"` rendered as a
+solid disc of its full radius, a shape under a `<mask>` as the whole unmasked
+shape, and a blurred bloom as the sharp silhouette it was blurred from. Paint
+opacity, gradient stop opacity, masks and filters are all discarded. So a
+`tinted` fill on soft artwork, the obvious way to whiten it for Mono, turns it
+into hard blobs.
+
+### Artwork that carries its own color
+
+With `glass: false` and no `fill`, ictool 27.1 draws the SVG as authored, and
+all of this was verified to render: `linearGradient` and `radialGradient` with
+many stops (`userSpaceOnUse` and the default bounding-box units),
+`stop-opacity`, `fill-opacity`, `opacity` on a shape, `opacity` on a `<g>`
+(composited as a group, so overlapping children leave no seam), `clipPath`,
+luminance `<mask>`, and `filter` with `feGaussianBlur`. PNG layers render too.
+Xcode 27.1's asset compiler accepts the same bundle, and the flattened
+`.icns` it writes for pre-26 deployment targets keeps the blur and the masks.
+
+`glass: true` on the same artwork thresholds it: the blurred disc came back as
+a solid disc with a glass rim. Soft light and Liquid Glass do not mix on one
+layer.
+
+Don't preview such artwork with ImageMagick: its built-in MSVG renderer drew
+a long polyline path as an empty image. Render through ictool, with a
+reference image as a PNG layer behind the art when you need to trace
+something.
 
 `position` also accepts `"relative-translation": [fx, fy]` (fractions of the
 canvas) alongside the two required keys.
@@ -213,9 +263,10 @@ RGB spaces need exactly four components, gray exactly two.
 | Automatic gradient | `{"automatic-gradient": "<colour>"}`: the system derives a ramp from one colour |
 | Keyword | `"automatic"` (inherit), `"none"` (paint nothing), `"system-light"`, `"system-dark"` |
 
-`orientation` coordinates are canvas-normalised (0..1), not pixels. Optional;
-without it the gradient runs top to bottom. Honoured on layers, ignored on the
-document fill (gotcha 4).
+`orientation` coordinates are 0..1 fractions of the layer artwork's bounding
+box, not pixels and not the canvas (gotcha 8; anchor the SVG to make them
+canvas fractions). Optional; without it the gradient runs top to bottom.
+Honored on layers, ignored on the document fill (gotcha 4).
 
 ### Specializations
 
@@ -230,8 +281,8 @@ All follow the same shape and the same base-entry-inside rule as
 
 | Slot key | Values | Notes |
 |---|---|---|
-| `appearance` | `light`, `dark`, `tinted` | Omitted = base. `light` is accepted in 27.0 and applies to Default. `"clear"` is **rejected** ("isn't in the correct format"); the Clear renditions are entirely system-derived. |
-| `idiom` | `square`, `iOS`, `macOS`, `watchOS` | Icon Composer 27. Accepted; produced no change in `ictool --platform macOS` renders. |
+| `appearance` | `light`, `dark`, `tinted` | Omitted = base. `light` is accepted in 27.0 and applies to Default. `tinted` is the GUI's **Mono** annotation and drives all four of TintedLight, TintedDark, ClearLight and ClearDark: a white `tinted` fill turns the Clear renditions bright white too. `"clear"` and `"mono"` are both **rejected** ("isn't in the correct format"). |
+| `idiom` | `square`, `iOS`, `macOS`, `watchOS` | Icon Composer 27. **Honored in 27.1**: an `idiom: "macOS"` fill changed the `--platform macOS` render (13% RMSE) and left `--platform iOS` byte-identical. The 27.0 notes recorded no change. |
 | `localization` | a locale ID | Icon Composer 27. Accepted; not exercised by `ictool`. |
 
 `"automatic"` as a `value` is only legal where a fill is expected. In an
@@ -240,7 +291,9 @@ All follow the same shape and the same base-entry-inside rule as
 **Tinted:** the tinted *background* is always system-derived; a `tinted` entry
 on the document fill does nothing. A `tinted` entry on a *layer* does apply,
 and the value is mapped through luminance, so a saturated colour lands as a
-grey of matching lightness.
+grey of matching lightness. It applies to the Clear renditions as well (see
+`appearance` above), so it is the one place to tune the icon for Tinted *and*
+Clear. Apple's WWDC26 lab advice is near-white foregrounds there, for range.
 
 ---
 
@@ -249,8 +302,8 @@ grey of matching lightness.
 `Default`, `Dark`, `TintedLight`, `TintedDark`, `ClearLight`, `ClearDark`.
 
 `Default` is the light appearance. Tinted and clear are derived by the system
-from your layers' luminance; check them, but you rarely need to specialize for
-them. watchOS has `Default` only.
+from your layers' luminance, or from their `tinted` specializations where
+present; check them. watchOS has `Default` only.
 
 ---
 
@@ -304,7 +357,7 @@ your work without opening the GUI.
 ```
 
 ```sh
-ictool --version     # {"bundle-version":"129","short-bundle-version":"27.0"}
+ictool --version     # {"bundle-version":"129","short-bundle-version":"27.1"}
 
 ictool AppIcon.icon --export-image --output-file out.png \
   --platform iOS --rendition Default --width 1024 --height 1024 --scale 1
@@ -327,7 +380,7 @@ ictool AppIcon.icon --export-image --output-file out26.png \
 | `--width` / `--height` / `--scale` | Points × scale; `1024 1024 2` writes a 2048 px PNG |
 | `--tint-color`, `--tint-strength` | Single numbers, for the `Tinted*` renditions |
 | `--design-generation` | `26` or `27`. 27 is the default and changes the output measurably |
-| `--light-angle` | Accepted and ignored in 27.0 (it did something in 1.x) |
+| `--light-angle` | Accepted and ignored in 27.0 and 27.1 (it did something in 1.x). The 27 renderer lights from directly above, matching the system UI. |
 
 `--export-image` is the only operation and validation is its side effect:
 success prints `{}` and exits 0; failure exits non-zero with the message on
