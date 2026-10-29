@@ -19,6 +19,11 @@ and material.
    the document; that is also the only place appearance variants exist.
 3. **Bake nothing.** No shadows, blurs, specular, opacity, translucency,
    background fills or corner masks in the artwork. The system applies all of it.
+
+   The one exception to rules 2 and 3 is a mark made of **light rather than
+   glass** (glow, aurora, neon, flame): glass and layer fills cannot draw soft
+   light, so there the SVG carries its own gradients, masks and blurs and every
+   layer opts out of glass. See `references/design.md`, "Light, not glass".
 4. **`groups[0]` is the FRONT.** Opposite of most layer formats.
 5. **Lint, because `ictool` will not.** It validates values, not keys: a
    misspelled key renders fine and does nothing. `iconkit.mjs validate` catches
@@ -35,8 +40,9 @@ node $SKILL/scripts/iconkit.mjs ictool         # verify Xcode 26+ / ictool is pr
 
 Requires macOS with Xcode 26+ (Icon Composer ships inside it) and Node 18+.
 ImageMagick is optional and only improves the contact sheets. The scripts
-were verified against Icon Composer 27.0 (Xcode 27); `ictool --version`
-prints yours.
+were verified against Icon Composer 27.0 and 27.1 (Xcode 27.x); `ictool
+--version` prints yours. What the 27 renderer changed, and what Apple advised
+at WWDC26, is summarized at the top of `references/design.md`.
 
 ---
 
@@ -116,6 +122,23 @@ Full detail in `references/file-format.md`.
 6. **`color-space-for-untagged-svg-colors` accepts only `"display-p3"`.** Any
    other value makes the document unreadable. Omit it for sRGB.
 7. **A missing image file is not an error.** The layer renders empty.
+8. **Gradient `orientation` is a fraction of the layer's bounding box, not the
+   canvas.** Invisible on full-bleed art, wrong everywhere else. `svg()` pins
+   every layer to the canvas with two transparent corner rects; keep them in
+   any SVG you write by hand.
+9. **More than two stops means several layers in one `lighting: "combined"`
+   group.** Combined lights the group as one glass body, so abutting segments
+   fuse without seams; "individual" gives every seam its own rim. Or put the
+   stops in the SVG itself (next item).
+10. **Soft artwork survives only with `glass: false` and no layer `fill`.**
+    Glass turns a layer's alpha into a hard slab (a blurred disc renders as a
+    solid disc with a rim), and a `fill` paints the artwork's *geometry* with
+    its opacity, masks and blur discarded. With both off, ictool 27.1 renders
+    the SVG as drawn: multi-stop linear and radial gradients, stop and fill
+    opacity, clip paths, luminance masks, Gaussian blur.
+11. **Group effects need a glass layer.** On a group whose layers are all
+    `glass: false`, `specular`, `translucency`, `shadow`, `blur-material` and
+    `lighting` render pixel-identically to leaving them out.
 
 **"The data couldn't be read because it isn't in the correct format"** means a
 rejected *value* (wrong type, bad enum, tvOS in `supported-platforms`), never
